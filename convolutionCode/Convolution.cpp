@@ -190,6 +190,7 @@ void comparison(MFData& res1, MFData& res2)
 {
 	int counter = 0;
 	int64_t iRow, iCol;
+	float eps = 1E-4;
 	float* res1Row, * res2Row;
 	for (iRow = 0; iRow < res1.m_i64H; iRow++)
 	{
@@ -197,7 +198,7 @@ void comparison(MFData& res1, MFData& res2)
 		res2Row = res2.pfGetRow(iRow);
 		for (iCol = 0; iCol < res1.m_i64W; iCol++)
 		{
-			if (res1Row[iCol] != res2Row[iCol])
+			if (fabs(res1Row[iCol] - res2Row[iCol]) > eps)
 			{
 				counter++;
 				std::cout << res1Row[iCol] << " " << res2Row[iCol] << std::endl;
@@ -1070,10 +1071,287 @@ int iConvolution_v4(MFData& ar_cmmIn, MFData& ar_cmmWin, MFData& ar_cmmOut)
 			pfRowOut[iCol] = f;
 		}
 	}
-
-
 	return 0;
 }
+
+// версия функции свертки с распараллеливанием внутреннего цикла с 
+// помощью open mp. Границы для свертки не распараллеливаем (смысла нет
+
+int iConvolution_vOMP(MFData& ar_cmmIn, MFData& ar_cmmWin, MFData& ar_cmmOut)
+{
+	int64_t iWinX = ar_cmmWin.m_i64W;
+	int64_t iWinY = ar_cmmWin.m_i64H;
+	if ((1 != (iWinX & 1)) || (iWinX < 3) || (1 != (iWinY & 1)) || (iWinY < 3))
+		return 2;	// Окно д.б. нечетного размера и >=3
+	int64_t iWinX_2 = iWinX >> 1;
+	int64_t iWinY_2 = iWinY >> 1;
+
+	ar_cmmOut.deleteData();
+	ar_cmmOut.iCreate(ar_cmmIn.m_i64W, ar_cmmIn.m_i64H, ar_cmmIn.m_i64Pow);
+	float f;
+	int64_t iRow, iCol, iX, iY, iR, iC, iD;
+	float* pfRowOut, * pfRowIn, * pfRowWin;
+	for (iRow = 0; iRow < iWinY_2; iRow++)
+	{
+		pfRowOut = ar_cmmOut.pfGetRow(iRow);
+		for (iCol = 0; iCol < iWinX_2; iCol++)
+		{
+			f = 0;
+
+			for (iY = -iWinY_2; iY <= iWinY_2; iY++)
+			{
+				iR = iRow + iY;
+				pfRowIn = (iR < 0) ? pfRowIn = ar_cmmIn.pfGetRow(-iR) : pfRowIn = ar_cmmIn.pfGetRow(iR);
+				pfRowWin = ar_cmmWin.pfGetRow(iY + iWinY_2);
+				if (iWinX_2 > 1)
+				{
+					for (iX = -iWinX_2; iX <= iWinX_2; iX++)
+					{
+						iC = iCol + iX;
+						if (iC < 0)
+							iC = -iC;
+						f += pfRowIn[iC] * pfRowWin[iX + iWinX_2];
+					}
+				}
+				else
+				{
+					f += pfRowIn[iCol + 1] * pfRowWin[0]
+						+ pfRowIn[iCol] * pfRowWin[1]
+						+ pfRowIn[iCol + 1] * pfRowWin[2];
+				}
+			}
+			pfRowOut[iCol] = f;
+		}
+		// обработка центральной части по горизонтали
+		for (iCol = iWinX_2; iCol < ar_cmmIn.m_i64W - iWinX_2; iCol++)
+		{
+			f = 0;
+			for (iY = -iWinY_2; iY <= iWinY_2; iY++)
+			{
+				iR = iRow + iY;
+				pfRowIn = (iR < 0) ? pfRowIn = ar_cmmIn.pfGetRow(-iR) : pfRowIn = ar_cmmIn.pfGetRow(iR);
+				pfRowWin = ar_cmmWin.pfGetRow(iY + iWinY_2);
+				// суммируем как 3*3
+				f += pfRowIn[iCol - 1] * pfRowWin[iWinX_2 - 1]
+					+ pfRowIn[iCol] * pfRowWin[iWinX_2]
+					+ pfRowIn[iCol + 1] * pfRowWin[iWinX_2 + 1];
+				// досчитываем пиксели справа и слева от вырезанного квадрата, если надо
+				// при этом можно также использовать то, что получающаяся рамка - симметричная
+				if (iWinX_2 > 1)
+				{
+					for (iX = 2; iX <= iWinX_2; iX++)
+					{
+						iC = iCol + iX;
+						iD = iCol - iX;
+						f += pfRowIn[iC] * pfRowWin[iX + iWinX_2] + pfRowIn[iD] * pfRowWin[iWinX_2 - iX];
+					}
+				}
+			}
+			pfRowOut[iCol] = f;
+		}
+
+		for (iCol = ar_cmmIn.m_i64W - iWinX_2; iCol < ar_cmmIn.m_i64W; iCol++)
+		{
+			f = 0;
+			for (iY = -iWinY_2; iY <= iWinY_2; iY++)
+			{
+				iR = iRow + iY;
+				if (iR < 0)
+					pfRowIn = ar_cmmIn.pfGetRow(-iR);
+				else
+					pfRowIn = ar_cmmIn.pfGetRow(iR);
+				pfRowWin = ar_cmmWin.pfGetRow(iY + iWinY_2);
+				if (iWinX_2 > 1) // случай 3*3
+				{
+					for (iX = -iWinX_2; iX <= iWinX_2; iX++)
+					{
+						iC = iCol + iX;
+						if (iC >= ar_cmmIn.m_i64W)
+							iC = 2 * ar_cmmIn.m_i64W - iC - 2;
+						f += pfRowIn[iC] * pfRowWin[iX + iWinX_2];
+					}
+				}
+				else
+				{
+					f += pfRowIn[iCol - 1] * pfRowWin[0]
+						+ pfRowIn[iCol] * pfRowWin[1]
+						+ pfRowIn[iCol - 1] * pfRowWin[2];
+				}
+			}
+			pfRowOut[iCol] = f;
+		}
+	}
+
+#pragma omp parallel for private (pfRowOut,iCol, iY,pfRowIn,pfRowWin,iX, iC, f,iR ,iD )
+	for (iRow = iWinY_2; iRow < ar_cmmIn.m_i64H - iWinY_2; iRow++)
+	{
+		pfRowOut = ar_cmmOut.pfGetRow(iRow);
+		for (iCol = 0; iCol < iWinX_2; iCol++)
+		{
+			f = 0;
+			for (iY = -iWinY_2; iY <= iWinY_2; iY++)
+			{
+				iR = iRow + iY;
+				pfRowIn = ar_cmmIn.pfGetRow(iR);
+				pfRowWin = ar_cmmWin.pfGetRow(iY + iWinY_2);
+				if (iWinX_2 > 1) // случай 3*3
+				{
+					for (iX = -iWinX_2; iX <= iWinX_2; iX++)
+					{
+						iC = iCol + iX;
+						if (iC < 0)
+							iC = -iC;
+						f += pfRowIn[iC] * pfRowWin[iX + iWinX_2];
+					}
+				}
+				else
+				{
+					f += pfRowIn[iCol - 1] * pfRowWin[0]
+						+ pfRowIn[iCol] * pfRowWin[1]
+						+ pfRowIn[iCol - 1] * pfRowWin[2];
+				}
+			}
+			pfRowOut[iCol] = f;
+		}
+
+		for (iCol = iWinX_2; iCol < ar_cmmIn.m_i64W - iWinX_2; iCol++)
+		{
+			f = 0;
+			for (iY = -iWinY_2; iY <= iWinY_2; iY++)
+			{
+				iR = iRow + iY;
+				pfRowIn = ar_cmmIn.pfGetRow(iR);
+				pfRowWin = ar_cmmWin.pfGetRow(iY + iWinY_2);
+				f += pfRowIn[iCol - 1] * pfRowWin[iWinX_2 - 1]
+					+ pfRowIn[iCol] * pfRowWin[iWinX_2]
+					+ pfRowIn[iCol + 1] * pfRowWin[iWinX_2 + 1];
+				if (iWinX_2 > 1) // случай 3*3
+				{
+					for (iX = 2; iX <= iWinX_2; iX++)
+					{
+						iC = iCol + iX;
+						iD = iCol - iX;
+						f += pfRowIn[iC] * pfRowWin[iX + iWinX_2] + pfRowIn[iD] * pfRowWin[iWinX_2 - iX];
+					}
+				}
+			}
+			pfRowOut[iCol] = f;
+		}
+
+		for (iCol = ar_cmmIn.m_i64W - iWinX_2; iCol < ar_cmmIn.m_i64W; iCol++)
+		{
+			f = 0;
+			for (iY = -iWinY_2; iY <= iWinY_2; iY++)
+			{
+				iR = iRow + iY;
+				pfRowIn = ar_cmmIn.pfGetRow(iR);
+				pfRowWin = ar_cmmWin.pfGetRow(iY + iWinY_2);
+				if (iWinX_2 > 1)
+					for (iX = -iWinX_2; iX <= iWinX_2; iX++)
+					{
+						iC = iCol + iX;
+						if (iC >= ar_cmmIn.m_i64W)
+							iC = 2 * ar_cmmIn.m_i64W - iC - 2;
+						f += pfRowIn[iC] * pfRowWin[iX + iWinX_2];
+					}
+				else
+				{
+					f += pfRowIn[iCol - 1] * pfRowWin[0]
+						+ pfRowIn[iCol] * pfRowWin[1]
+						+ pfRowIn[iCol - 1] * pfRowWin[2];
+				}
+			}
+			pfRowOut[iCol] = f;
+		}
+	}
+
+	for (iRow = ar_cmmIn.m_i64H - iWinY_2; iRow < ar_cmmIn.m_i64H; iRow++)
+	{
+		pfRowOut = ar_cmmOut.pfGetRow(iRow);
+		for (iCol = 0; iCol < iWinX_2; iCol++)
+		{
+			f = 0;
+			for (iY = -iWinY_2; iY <= iWinY_2; iY++)
+			{
+				iR = iRow + iY;
+				if (iR >= ar_cmmIn.m_i64H)
+					pfRowIn = ar_cmmIn.pfGetRow(2 * ar_cmmIn.m_i64H - iR - 2);
+				else
+					pfRowIn = ar_cmmIn.pfGetRow(iR);
+				pfRowWin = ar_cmmWin.pfGetRow(iY + iWinY_2);
+				if (iWinX_2 > 1)
+					for (iX = -iWinX_2; iX <= iWinX_2; iX++)
+					{
+						iC = iCol + iX;
+						if (iC < 0)
+							iC = -iC;
+
+						f += pfRowIn[iC] * pfRowWin[iX + iWinX_2];
+					}
+				else
+				{
+					f += pfRowIn[iCol - 1] * pfRowWin[0]
+						+ pfRowIn[iCol] * pfRowWin[1]
+						+ pfRowIn[iCol - 1] * pfRowWin[2];
+				}
+			}
+			pfRowOut[iCol] = f;
+		}
+		;
+		for (iCol = iWinX_2; iCol < ar_cmmIn.m_i64W - iWinX_2; iCol++)
+		{
+			f = 0;
+			for (iY = -iWinY_2; iY <= iWinY_2; iY++)
+			{
+				iR = iRow + iY;
+				pfRowIn = (iR >= ar_cmmIn.m_i64H) ? ar_cmmIn.pfGetRow(2 * ar_cmmIn.m_i64H - iR - 2) : pfRowIn = ar_cmmIn.pfGetRow(iR);
+
+				pfRowWin = ar_cmmWin.pfGetRow(iY + iWinY_2);
+				f += pfRowIn[iCol - 1] * pfRowWin[iWinX_2 - 1]
+					+ pfRowIn[iCol] * pfRowWin[iWinX_2]
+					+ pfRowIn[iCol + 1] * pfRowWin[iWinX_2 + 1];
+				if (iWinX_2 > 1) // случай 3*3
+				{
+					for (iX = 2; iX <= iWinX_2; iX++)
+					{
+						iC = iCol + iX;
+						iD = iCol - iX;
+						f += pfRowIn[iC] * pfRowWin[iX + iWinX_2] + pfRowIn[iD] * pfRowWin[iWinX_2 - iX];
+					}
+				}
+			}
+			pfRowOut[iCol] = f;
+		}
+
+		for (iCol = ar_cmmIn.m_i64W - iWinX_2; iCol < ar_cmmIn.m_i64W; iCol++)
+		{
+			f = 0;
+			for (iY = -iWinY_2; iY <= iWinY_2; iY++)
+			{
+				iR = iRow + iY;
+				pfRowIn = (iR >= ar_cmmIn.m_i64H) ? ar_cmmIn.pfGetRow(2 * ar_cmmIn.m_i64H - iR - 2) : pfRowIn = ar_cmmIn.pfGetRow(iR);
+				pfRowWin = ar_cmmWin.pfGetRow(iY + iWinY_2);
+				if (iWinX_2 > 1)
+					for (iX = -iWinX_2; iX <= iWinX_2; iX++)
+					{
+						iC = iCol + iX;
+						if (iC >= ar_cmmIn.m_i64W)
+							iC = 2 * ar_cmmIn.m_i64W - iC - 2;
+						f += pfRowIn[iC] * pfRowWin[iX + iWinX_2];
+					}
+				else
+				{
+					f += pfRowIn[iCol - 1] * pfRowWin[0]
+						+ pfRowIn[iCol] * pfRowWin[1]
+						+ pfRowIn[iCol - 1] * pfRowWin[2];
+				}
+			}
+			pfRowOut[iCol] = f;
+		}
+	}
+	return 0;
+}
+
 
 int _tmain(int argc, _TCHAR* argv[])
 {
@@ -1086,15 +1364,15 @@ int _tmain(int argc, _TCHAR* argv[])
 	cmmWin.iRead("D:/Convolution/Convolution/blur3.mfd");
 
 	dStart = omp_get_wtime();
-	iConvolution(cmmIn, cmmWin, cmmOut);
+	iConvolution_v4(cmmIn, cmmWin, cmmOut);
 	dEnd = omp_get_wtime();
 	printf("3x3 - %lg sec.\n", dEnd - dStart);
 
 	dStart = omp_get_wtime();
-	iConvolution_v3(cmmIn, cmmWin, cmmOut1);
+	iConvolution_vOMP(cmmIn, cmmWin, cmmOut1);
 	dEnd = omp_get_wtime();
 	printf("3x3 - %lg sec.\n", dEnd - dStart);
-	//comparison(cmmOut, cmmOut1);
+	comparison(cmmOut, cmmOut1);
 	cmmOut.iWrite("D:/Convolution/Convolution/out3.mfd");
 
 	// 5x5
@@ -1104,26 +1382,24 @@ int _tmain(int argc, _TCHAR* argv[])
 	iConvolution(cmmIn, cmmWin, cmmOut);
 	dEnd = omp_get_wtime();
 	printf("5x5 - %lg sec.\n", dEnd - dStart);
-
 	dStart = omp_get_wtime();
 	iConvolution_v4(cmmIn, cmmWin, cmmOut1);
 	dEnd = omp_get_wtime();
-	comparison(cmmOut, cmmOut1);
 	printf("5x5 - %lg sec.\n", dEnd - dStart);
-
+	comparison(cmmOut, cmmOut1);
 	cmmOut.iWrite("D:/Convolution/Convolution/out5.mfd");
 
 	// 7x7
 	cmmWin.iRead("D:/Convolution/Convolution/blur7.mfd");
 
 	dStart = omp_get_wtime();
-	iConvolution(cmmIn, cmmWin, cmmOut);
+	iConvolution_v4(cmmIn, cmmWin, cmmOut);
 	dEnd = omp_get_wtime();
 	printf("7x7 - %lg sec.\n", dEnd - dStart);
 
 
 	dStart = omp_get_wtime();
-	iConvolution_v2(cmmIn, cmmWin, cmmOut);
+	iConvolution_vOMP(cmmIn, cmmWin, cmmOut1);
 	dEnd = omp_get_wtime();
 	printf("7x7 - %lg sec.\n", dEnd - dStart);
 	cmmOut.iWrite("D:/Convolution/Convolution/out7.mfd");
